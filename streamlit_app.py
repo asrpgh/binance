@@ -11,8 +11,13 @@ st.title("💵 Binance P2P — VES → USDT (Tendencia de mercado)")
 # ---------- Cargar y preparar datos (robusto) ----------
 @st.cache_data(ttl=60)  # cache por 60s para no recargar en cada interacción
 def load_and_prepare(url):
-    #df = pd.read_csv(url)
-    df = pd.read_csv('./data/p2p_ves_usdt.csv')
+    df = pd.read_csv(url)
+    dflocal = pd.read_csv('./data/p2p_ves_usdt.csv')
+
+    # See which is bigger 
+    if dflocal.shape[0] > df.shape[0]:
+        df = dflocal
+
     # buscar columna de fecha/hora entre las más comunes
     posibles = ["datetime_utc", "timestamp", "datetime", "date", "time"]
     dtcol = None
