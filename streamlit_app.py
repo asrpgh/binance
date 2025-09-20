@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.express as px
 
 # ---------- Config ----------
-CSV_URL = "https://raw.githubusercontent.com/asrpgh/binance-p2p/main/data/p2p_ves_usdt.csv"
+CSV_URL = "https://raw.githubusercontent.com/asrpgh/binance/main/data/p2p_ves_usdt.csv"
 st.set_page_config(page_title="Binance P2P — VES → USDT", layout="wide")
 st.title("💵 Binance P2P — VES → USDT (Tendencia de mercado)")
 
