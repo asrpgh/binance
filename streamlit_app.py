@@ -14,22 +14,40 @@ st.set_page_config(page_title="Binance P2P — Master Dashboard", layout="wide")
 
 # ---------- 2. Persistent Login ----------
 def check_login():
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
-    if st.session_state["authenticated"]:
+    # If already authenticated, return True
+    if st.session_state.get("authenticated", False):
         return True
-    
-    stored_password = streamlit_js_eval(js_expressions="localStorage.getItem('p2p_app_pwd')", key="get_ls")
-    if stored_password == APP_PASSWORD:
+
+    # Initialize flag for localStorage check if not already done
+    if "ls_check_done" not in st.session_state:
+        st.session_state.ls_check_done = False
+
+    # First run: trigger localStorage retrieval and wait
+    if not st.session_state.ls_check_done:
+        # This call will set st.session_state['get_ls'] when done and trigger rerun
+        streamlit_js_eval(js_expressions="localStorage.getItem('p2p_app_pwd')", key="get_ls")
+        st.session_state.ls_check_done = True
+        # Show a loading message while waiting for the component result
+        with st.spinner("Verificando credenciales..."):
+            # Stop further execution until the component triggers a rerun
+            st.stop()
+        return False  # This won't be reached because of st.stop()
+
+    # If we reach here, we have the result of localStorage.getItem
+    stored_password = st.session_state.get("get_ls")
+    if stored_password is not None and stored_password == APP_PASSWORD:
         st.session_state["authenticated"] = True
         return True
 
+    # No valid stored password, show login form
     st.title("🔒 Acceso Restringido")
     pwd_input = st.text_input("Introduce la contraseña maestra:", type="password")
     if st.button("Ingresar"):
         if pwd_input == APP_PASSWORD:
+            # Save to localStorage and set authenticated
             streamlit_js_eval(js_expressions=f"localStorage.setItem('p2p_app_pwd', '{pwd_input}')", key="set_ls")
             st.session_state["authenticated"] = True
+            # Optionally clear the flag to allow fresh check later? Not necessary.
             st.rerun()
         else:
             st.error("Contraseña incorrecta.")
