@@ -1,7 +1,5 @@
-requests
 pandas
 streamlit>=1.35.0
-altair>=5.0.0
 plotly
 pytz
 libsql-experimental
