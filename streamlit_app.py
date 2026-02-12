@@ -14,45 +14,51 @@ st.set_page_config(page_title="Binance P2P — Master Dashboard", layout="wide")
 
 # ---------- 2. Persistent Login ----------
 def check_login():
-    # If already authenticated, return True
+    # Already authenticated in this session
     if st.session_state.get("authenticated", False):
         return True
 
-    # Initialize flag for localStorage check if not already done
+    # Flag to track if we already triggered the localStorage read
     if "ls_check_done" not in st.session_state:
         st.session_state.ls_check_done = False
 
-    # First run: trigger localStorage retrieval and wait
+    # ---- First run of this session: read from localStorage ----
     if not st.session_state.ls_check_done:
-        # This call will set st.session_state['get_ls'] when done and trigger rerun
-        streamlit_js_eval(js_expressions="localStorage.getItem('p2p_app_pwd')", key="get_ls")
+        # Request the stored password (will set session_state.get_ls when done)
+        streamlit_js_eval(
+            js_expressions="localStorage.getItem('p2p_app_pwd')",
+            key="get_ls"
+        )
         st.session_state.ls_check_done = True
-        # Show a loading message while waiting for the component result
-        with st.spinner("Verificando credenciales..."):
-            # Stop further execution until the component triggers a rerun
-            st.stop()
-        return False  # This won't be reached because of st.stop()
 
-    # If we reach here, we have the result of localStorage.getItem
+        # Wait for the component result
+        with st.spinner("Verificando credenciales..."):
+            st.stop()          # Execution stops; component triggers rerun later
+        return False           # (never reached)
+
+    # ---- We have the localStorage value (or None) ----
     stored_password = st.session_state.get("get_ls")
     if stored_password is not None and stored_password == APP_PASSWORD:
         st.session_state["authenticated"] = True
         return True
 
-    # No valid stored password, show login form
+    # ---- No valid stored password → show manual login ----
     st.title("🔒 Acceso Restringido")
     pwd_input = st.text_input("Introduce la contraseña maestra:", type="password")
     if st.button("Ingresar"):
         if pwd_input == APP_PASSWORD:
-            # Save to localStorage and set authenticated
-            streamlit_js_eval(js_expressions=f"localStorage.setItem('p2p_app_pwd', '{pwd_input}')", key="set_ls")
+            # Save to localStorage and update session state immediately
+            streamlit_js_eval(
+                js_expressions=f"localStorage.setItem('p2p_app_pwd', '{pwd_input}')",
+                key="set_ls"
+            )
             st.session_state["authenticated"] = True
-            # Optionally clear the flag to allow fresh check later? Not necessary.
+            st.session_state["ls_check_done"] = True
+            st.session_state["get_ls"] = pwd_input   # avoid another component call
             st.rerun()
         else:
             st.error("Contraseña incorrecta.")
     return False
-
 if not check_login():
     st.stop()
 
@@ -112,8 +118,16 @@ st.sidebar.title("⚙️ Configuración")
 
 # Logout
 if st.sidebar.button("Cerrar Sesión"):
-    streamlit_js_eval(js_expressions="localStorage.removeItem('p2p_app_pwd')", key="logout_js")
+    # Remove from localStorage
+    streamlit_js_eval(
+        js_expressions="localStorage.removeItem('p2p_app_pwd')",
+        key="logout_js"
+    )
+    # Reset session state
     st.session_state["authenticated"] = False
+    st.session_state["ls_check_done"] = False      # force new localStorage read
+    if "get_ls" in st.session_state:
+        del st.session_state["get_ls"]            # erase old value
     st.rerun()
 
 st.sidebar.divider()
