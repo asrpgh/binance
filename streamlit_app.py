@@ -1,140 +1,171 @@
 import streamlit as st
 import pandas as pd
+import libsql_experimental as libsql
 import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
+from streamlit_js_eval import streamlit_js_eval
 
-# ---------- Config ----------
-CSV_URL = "https://raw.githubusercontent.com/asrpgh/binance/main/data/p2p_ves_usdt.csv"
-st.set_page_config(page_title="Binance P2P — VES → USDT", layout="wide")
-st.title("💵 Binance P2P — VES → USDT")
+# ---------- 1. Configuration & Secrets ----------
+# Fetch credentials from .streamlit/secrets.toml or Streamlit Cloud Secrets
+TURSO_URL = st.secrets.get("TURSO_URL", "")
+TURSO_AUTH_TOKEN = st.secrets.get("TURSO_AUTH_TOKEN", "")
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")  # Default if not set
 
-# ---------- Cargar y preparar datos ----------
-@st.cache_data(ttl=60)
-def load_and_prepare(url):
-    try:
-        df = pd.read_csv(url)
-    except:
-        df = pd.DataFrame()
+st.set_page_config(page_title="Binance P2P — Secure Turso", layout="wide")
 
-    try:
-        dflocal = pd.read_csv('./data/p2p_ves_usdt.csv')
-        if dflocal.shape[0] > df.shape[0]:
-            df = dflocal
-    except FileNotFoundError:
-        pass
+# ---------- 2. Persistent Login Logic ----------
 
-    posibles = ["datetime_utc", "timestamp", "datetime", "date", "time"]
-    dtcol = next((c for c in posibles if c in df.columns), None)
+def check_login():
+    """
+    Handles authentication by checking Session State and Browser Local Storage.
+    If the password in LocalStorage matches the secret, it bypasses the login screen.
+    """
+    # Initialize session state if not present
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
 
-    if dtcol is None:
-        raise ValueError("No se encontró columna de fecha/hora.")
+    if st.session_state["authenticated"]:
+        return True
 
-    df[dtcol] = pd.to_datetime(df[dtcol], errors="coerce", utc=True)
-    df = df.dropna(subset=[dtcol]).reset_index(drop=True)
-    df["datetime_bo"] = df[dtcol].dt.tz_convert("America/Caracas")
-
-    # Filtro 30 días
-    last_date_available = df["datetime_bo"].max()
-    one_month_ago = last_date_available - pd.Timedelta(days=30)
-    df = df[df["datetime_bo"] >= one_month_ago].copy()
-
-    df["Fecha"] = df["datetime_bo"].dt.date
-    df["Hora"] = df["datetime_bo"].dt.strftime("%H:%M:%S")
-
-    numeric_cols = ["buy_median", "sell_median", "market_median"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Attempt to read password from browser's Local Storage
+    # This runs a JS snippet to pull the value
+    stored_password = streamlit_js_eval(js_expressions="localStorage.getItem('p2p_app_pwd')", key="get_ls")
     
-    return df
+    # Validation: If LS matches current secret, skip login
+    if stored_password == APP_PASSWORD:
+        st.session_state["authenticated"] = True
+        return True
 
-try:
-    df = load_and_prepare(CSV_URL)
-except Exception as e:
-    st.error(f"Error cargando CSV: {e}")
+    # Show Login UI
+    st.markdown("### 🔒 Acceso Restringido")
+    with st.container():
+        pwd_input = st.text_input("Introduce la contraseña maestra:", type="password")
+        if st.button("Ingresar"):
+            if pwd_input == APP_PASSWORD:
+                # Save to Local Storage via JS to persist across refreshes/tabs
+                streamlit_js_eval(js_expressions=f"localStorage.setItem('p2p_app_pwd', '{pwd_input}')", key="set_ls")
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
+    
+    return False
+
+# Stop the app here if not logged in
+if not check_login():
     st.stop()
 
-# ---------- Sidebar ----------
-st.sidebar.header("⚙️ Configuración")
+# ---------- 3. Data Fetching (Turso) ----------
+
+@st.cache_data(ttl=300)
+def get_p2p_data(seconds_limit):
+    """
+    Queries Turso DB for aggregated P2P data from the last month.
+    """
+    try:
+        conn = libsql.connect(TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
+        
+        # SQL logic for time-bucketing and 1-month window
+        query = """
+        SELECT 
+            datetime(
+                (strftime('%s', datetime_utc) / ?) * ?, 
+                'unixepoch'
+            ) AS interval_start,
+            SUM(buy_count) AS total_buy_count,
+            AVG(buy_median) AS buy_median,
+            MIN(buy_min) AS buy_min,
+            MAX(buy_max) AS buy_max,
+            SUM(sell_count) AS total_sell_count,
+            AVG(sell_median) AS sell_median,
+            MIN(sell_min) AS sell_min,
+            MAX(sell_max) AS sell_max,
+            AVG(market_median) AS market_median
+        FROM p2p_data 
+        WHERE datetime_utc >= date('now', '-1 month')
+        GROUP BY interval_start
+        ORDER BY interval_start DESC;
+        """
+        
+        df = pd.read_sql_query(query, conn, params=(seconds_limit, seconds_limit))
+        conn.close()
+        
+        if df.empty:
+            return df
+
+        # Timezone conversion to Venezuela
+        df["interval_start"] = pd.to_datetime(df["interval_start"], utc=True)
+        df["datetime_bo"] = df["interval_start"].dt.tz_convert("America/Caracas")
+        
+        return df
+    except Exception as e:
+        st.error(f"⚠️ Error de base de datos: {e}")
+        return pd.DataFrame()
+
+# ---------- 4. Dashboard UI ----------
+
+# Sidebar Controls
+st.sidebar.title("🛠️ Panel de Control")
+
+# Logout button: Clears session and LocalStorage
+if st.sidebar.button("Cerrar Sesión (Log Out)"):
+    streamlit_js_eval(js_expressions="localStorage.removeItem('p2p_app_pwd')", key="logout_js")
+    st.session_state["authenticated"] = False
+    st.rerun()
+
+st.sidebar.divider()
 
 intervalo_map = {
-    "5 Minutos": "5T",
-    "30 Minutos": "30T",
-    "1 Hora": "1H",
-    "4 Horas": "4H",
-    "Diario": "D",
-    "Semanal": "W"
+    "5 Minutos": 300,
+    "1 Hora": 3600,
+    "Diario": 86400
 }
-seleccion = st.sidebar.selectbox("Temporalidad de Velas:", list(intervalo_map.keys()), index=2)
-freq = intervalo_map[seleccion]
+seleccion = st.sidebar.selectbox("Temporalidad de Velas:", list(intervalo_map.keys()), index=1)
+seconds = intervalo_map[seleccion]
 
-min_date_in_df = df["datetime_bo"].min().date()
-max_date_in_df = df["datetime_bo"].max().date()
+# Header
+st.title("💵 Binance P2P — VES/USDT")
+st.caption("Visualización en tiempo real desde Turso (Últimos 30 días)")
 
-start_date, end_date = st.sidebar.date_input(
-    "📅 Rango de fechas:",
-    [min_date_in_df, max_date_in_df],
-    min_value=min_date_in_df,
-    max_value=max_date_in_df
-)
+# Main Logic
+df = get_p2p_data(seconds)
 
-# Filtrar datos
-mask = (df["datetime_bo"].dt.date >= start_date) & (df["datetime_bo"].dt.date <= end_date)
-df_filtered = df.loc[mask].copy().sort_values("datetime_bo")
-
-if df_filtered.empty:
-    st.info("No hay datos en el rango seleccionado.")
+if df.empty:
+    st.warning("No hay datos disponibles en este momento.")
 else:
-    # --- Lógica de Velas (OHLC) con Apertura Forzada ---
-    ohlc_df = df_filtered.set_index("datetime_bo")["market_median"].resample(freq).ohlc().dropna()
-    
-    # Forzar que Open[n] = Close[n-1] para evitar gaps visuales
-    ohlc_df['open'] = ohlc_df['close'].shift(1).fillna(ohlc_df['open'])
+    # Summary Metrics
+    latest = df.iloc[0]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Precio Actual", f"{latest['market_median']:.3f} VES")
+    m2.metric("Máximo (30d)", f"{df['buy_max'].max():.3f} VES")
+    m3.metric("Mínimo (30d)", f"{df['sell_min'].min():.3f} VES")
 
-    # --- Layout con Pestañas ---
-    tab1, tab2, tab3 = st.tabs(["🕯️ Velas (Análisis)", "📈 Línea (Tendencia)", "📊 Datos"])
+    # Tabs
+    tab1, tab2 = st.tabs(["🕯️ Gráfico de Velas", "📊 Registros Crudos"])
 
     with tab1:
-        st.subheader(f"Gráfico de Velas Continuo ({seleccion})")
-        fig_candle = go.Figure(data=[go.Candlestick(
-            x=ohlc_df.index,
-            open=ohlc_df['open'], high=ohlc_df['high'],
-            low=ohlc_df['low'], close=ohlc_df['close'],
-            increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
-            name="VES/USDT"
+        # OHLC logic: 'Open' is the 'Close' of the chronologically previous candle
+        # Since DF is DESC, the previous candle is index + 1
+        fig = go.Figure(data=[go.Candlestick(
+            x=df['datetime_bo'],
+            open=df['market_median'].shift(-1).fillna(df['market_median']),
+            high=df['buy_max'],
+            low=df['sell_min'],
+            close=df['market_median'],
+            increasing_line_color='#26a69a', 
+            decreasing_line_color='#ef5350'
         )])
-        fig_candle.update_layout(
-            template="plotly_dark", 
-            height=600, 
+
+        fig.update_layout(
+            template="plotly_dark",
+            height=600,
             xaxis_rangeslider_visible=False,
-            margin=dict(t=0, b=0)
+            margin=dict(t=30, b=0, l=10, r=10)
         )
-        st.plotly_chart(fig_candle, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
-        st.subheader("Tendencia de Mercado Continua")
-        fig_line = px.line(
-            df_filtered,
-            x="datetime_bo",
-            y="market_median",
-            labels={"datetime_bo": "Fecha (VET)", "market_median": "VES/USDT"},
-            template="plotly_dark"
-        )
-        fig_line.update_traces(line_color='#00d1ff')
-        fig_line.update_layout(height=600)
-        st.plotly_chart(fig_line, use_container_width=True)
+        st.subheader("Datos Agregados por Periodo")
+        st.dataframe(df, use_container_width=True)
 
-    with tab3:
-        # Métricas resumidas
-        df_metrics = df_filtered.sort_values("datetime_bo", ascending=False)
-        m1, m2, m3 = st.columns(3)
-        last_val = df_metrics["market_median"].iloc[0]
-        m1.metric("Precio Actual", f"{last_val:.3f} VES")
-        m2.metric("Máximo Periodo", f"{df_metrics['market_median'].max():.3f} VES")
-        m3.metric("Mínimo Periodo", f"{df_metrics['market_median'].min():.3f} VES")
-        
-        st.subheader("Registros Raw (5m)")
-        st.dataframe(df_metrics[["Fecha", "Hora", "market_median", "buy_median", "sell_median"]], use_container_width=True)
-
-st.caption("Nota: El gráfico de velas utiliza 'Apertura Forzada' para mantener la continuidad visual.")
+st.divider()
+st.caption("Nota: La contraseña se persiste localmente. Si la cambias en los Secretos, se requerirá un nuevo login.")
